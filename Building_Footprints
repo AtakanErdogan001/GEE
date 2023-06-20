@@ -1,0 +1,146 @@
+/**** Start of imports. If edited, may not auto-convert in the playground. ****/
+var table = ee.FeatureCollection("projects/ee-atakanerdogan001/assets/Yerlesim_1");
+/***** End of imports. If edited, may not auto-convert in the playground. *****/
+// This example script shows how to calculate building density
+// using the Global MS Buildings Footprints Dataset
+
+// Here's the overview of the workflow
+// 1. Create a regular grid of chosen size
+// 2. Count the number of buildings in each grid
+// 3. Color each grid polygon based on building density
+// 4. Export the resulting map image.
+
+// This script uses Advanced Vector Processing techniques
+// To understand these concepts, read my Chapter F5.3 of
+// the open-access EEFA Book at https://www.eefabook.org/
+
+// Select your region of interest
+// You can also just draw a polygon using the drawing tools instead
+// and comment out the code for region selection below
+var admin2 = ee.FeatureCollection('FAO/GAUL_SIMPLIFIED_500m/2015/level2');
+// Loads the 'admin2' layer and zoom to your region of interest
+// Switch to the Inspector tab and click on a polygon
+// Expand the '▶ Feature ...' section and note the value
+// for ADM0_NAME, ADM1_NAME and ADM2_NAME. Replace the value below with it.
+var ADM0_NAME = 'Turkey';
+var ADM1_NAME = 'Izmir';
+var ADM2_NAME = 'Menderes';
+
+var selected = admin2
+  .filter(ee.Filter.eq('ADM0_NAME', ADM0_NAME))
+  .filter(ee.Filter.eq('ADM1_NAME', ADM1_NAME))
+  .filter(ee.Filter.eq('ADM2_NAME', ADM2_NAME))
+var geometry = selected.geometry();
+Map.addLayer(geometry, {color: 'gray'}, 'Selected Region');
+Map.addLayer(table, {color: 'gray'}, 'yerlesim');
+Map.centerObject(geometry, 10);
+
+// Use the Microsoft Global Building Footprints dataset from the GEE Community Catalog
+// https://gee-community-catalog.org/projects/msbuildings
+// This is a very large dataset divided into 1 collection per country
+// Select the collection for the country of interest
+var objects = ee.data.listAssets('projects/sat-io/open-datasets/MSBuildings')
+print('Assets in MS Global Buildings Footprint Folder', objects['assets'])
+
+// We are using the collection for India
+// Other collections are at 
+var buildingsCol = ee.FeatureCollection('projects/sat-io/open-datasets/MSBuildings/Turkey')
+// Clipping the buildings feature collection to the region of interest
+var buildings = buildingsCol.filter(ee.Filter.bounds(geometry));
+
+// Adding the clipped buildings to the map
+Map.addLayer(buildings, {'color':'blue'}, 'Buildings', false);
+
+// Creating 1000m grid within the geometry
+var gridSizeMeters = 30;
+
+// Generate a rectangular grid
+var grid = geometry.coveringGrid('EPSG:4326', gridSizeMeters)
+
+// Paint all the polygon edges with the same number and width, display.
+var gridOutline = ee.Image().byte().paint({
+  featureCollection: grid,
+  color: 1,
+  width: 0.5
+});
+Map.addLayer(gridOutline, {palette: 'FF0000'}, 'Grids');
+
+var intersectFilter = ee.Filter.intersects({
+    leftField: '.geo',
+    rightField: '.geo',
+    maxError: 10
+});
+
+var saveAllJoin = ee.Join.saveAll({
+    matchesKey: 'buildings',
+});
+
+var joined = saveAllJoin
+    .apply(grid, buildings, intersectFilter);
+print(joined.first());
+
+
+// Calculate total number of buildings within each feature.
+var buildingCounts = joined.map(function(f) {
+    var buildingsWithin = ee.List(f.get('buildings'));
+    var totalBuildings = ee.FeatureCollection(buildingsWithin).size();
+    return f.set('total_buildings', totalBuildings);
+});
+
+print(buildingCounts.first());
+// We can export the grid with building count as a shapefile
+// We use the 'selectors' option to only export
+// the geometry and the total_buildings attribute
+Export.table.toDrive({
+  collection: buildingCounts.select(['total_buildings']),
+  description: 'Grid_With_Building_Count',
+  folder: 'earthengine',
+  fileNamePrefix: 'grid_with_count',
+  fileFormat: 'SHP',
+})
+
+// We now have count of buildings per unit area
+// Let's visualize to create a choropleth map
+var buildingDensity = ee.Image().int().paint({
+    featureCollection: buildingCounts,
+    color: 'total_buildings',
+});
+
+var palette = ['#313695', '#4575b4', '#74add1', '#abd9e9', '#e0f3f8',
+              '#fee090', '#fdae61', '#f46d43', '#d73027', '#a50026'];
+
+// Adjust the min/max for your region
+// This is the number of buildings per sq. km.
+var visParams = {
+  min: 75, 
+  max: 500, 
+  palette: palette
+};
+Map.addLayer(buildingDensity.clip(geometry), visParams, 'Building Density', false);
+
+// This being a large computation, it is not possible to visualize the results
+// interactively. Let's export the results and download the resulting image
+// from Google Drive.
+var exportImage = buildingDensity.clip(geometry).visualize(visParams);
+
+// Export the image if the visualization times out.
+Export.image.toDrive({
+    image: exportImage,
+    description: 'Building_Density',
+    folder: 'earthengine',
+    fileNamePrefix: 'building_density',
+    region: geometry,
+    scale: gridSizeMeters,
+    maxPixels: 1e9
+});
+ 
+var AOI_MENDERES = ee.FeatureCollection([geometry])
+
+Export.table.toDrive({collection:AOI_MENDERES, 
+   description:'menderes_area', 
+   folder:'CNN',
+   fileFormat:'SHP', 
+   })
+
+
+
